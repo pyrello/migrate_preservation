@@ -1,0 +1,293 @@
+<?php
+
+define("DOCUMENT_PATH_ABSOLUTE", variable_get('migrate_preservation_document_path_absolute', DRUPAL_ROOT));
+
+/*
+ * You must implement hook_migrate_api(), setting the API level to 2, for
+ * your migration classes to be recognized by the Migrate module.
+ */
+function migrate_preservation_migrate_api() {
+  $api = array(
+    'api' => 2,
+  );
+  return $api;
+}
+
+function migrate_preservation_menu() {
+	$items = array();
+	$items['admin/config/development/migrate_preservation'] = array(
+		'title' => 'Migrate Preservation Settings',
+		'page callback' => 'drupal_get_form',
+		'access arguments' => array('access content'),
+		'page arguments' => array('migrate_preservation_settings'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+	$items['admin/config/development/convert_xml'] = array(
+		'title' => 'Convert XML Files',
+		'page callback' => 'drupal_get_form',
+		'access arguments' => array('administer content'),
+		'page arguments' => array('migrate_preservation_convert_xml_form'),
+		'type' => MENU_NORMAL_ITEM,
+	);
+	return $items;
+}
+
+function migrate_preservation_settings() {
+	$form = array();
+	$dir = variable_get('migrate_preservation_document_path_absolute', DRUPAL_ROOT);
+	$form['doc_path'] = array(
+		'#title' => t('Document path'),
+		'#type' => 'textfield',
+		'#description' => t('Enter the absolute path to the Documents directory. Example: /home/user/path/to/Documents'),
+		'#default_value' => $dir,
+	);
+	$form['#submit'][] = 'migrate_preservation_settings_submit';
+	
+	try {
+		$files = file_scan_directory($dir, '/\.xml$/', array('recurse' => FALSE));
+	} catch (Exception $e) {
+		dpm($e->getMessage(), 'Caught exception');
+	}
+	return system_settings_form($form);
+}
+
+function migrate_preservation_settings_submit(&$form, &$form_state) {
+	if ($form_state['values']['doc_path'] != '' && $form_state['values']['doc_path'] != DRUPAL_ROOT) {
+		variable_set('migrate_preservation_document_path_absolute', $form_state['values']['doc_path']);
+	}
+}
+
+function migrate_preservation_convert_xml_form($form, &$form_state) {
+	$dir = DOCUMENT_PATH_ABSOLUTE;
+	
+	$files = file_scan_directory($dir, '/.*\.xml$/');
+	
+	$filecount = count($files);
+	
+	$titles = migrate_preservation_get_titles_from_datajs();
+	
+	$titlecount = count($titles);
+	
+	$machine_name = 'publication_title';
+	//$vocab = taxonomy_vocabulary_machine_name_load('publication_title');
+	//dpm($vocab, 'vocab');
+	/*foreach ($titles as $title) {
+		$match = taxonomy_get_term_by_name($title, $machine_name);
+		if (!empty($match)) {
+			dpm($match);
+		}
+	}*/
+	
+	$form['description'] = array(
+		'#type' => 'markup',
+		'#markup' => t('Use the following sections to prepare for a Advantage Preservation migration to Drupal.'),
+	);
+	$form['convert'] = array(
+		'#type' => 'fieldset',
+		'#title' => 'Convert XML files',
+		'#description' => t('Click the button to convert !count XML documents to a format that has a unique id per record for the entire set.', array('!count' => $filecount)),
+	);
+	
+	$form['convert']['submit_convert'] = array(
+		'#type' => 'submit',
+		'#value' => t('Convert'),
+	);
+		$form['import_titles'] = array(
+			'#type' => 'fieldset',
+			'#title' => 'Import Publication Titles',
+			'#description' => ($titlecount > 0) ? t('Click the button to import !count Publication Titles from the data.js file.', array('!count' => $titlecount)) : t('There are no more titles to import'),
+		);
+		
+	if ($titlecount > 0) {
+		$form['import_titles']['submit_import'] = array(
+			'#type' => 'submit',
+			'#value' => t('Import'),
+		);
+	}
+	return $form;
+}
+
+function migrate_preservation_convert_xml_form_submit($form, &$form_state) {
+	if ($form_state['clicked_button']['#value'] == $form_state['values']['submit_convert']) {
+		$function = 'migrate_preservation_convert_xml_batch';
+		$batch = $function();
+		batch_set($batch);
+	} else if ($form_state['clicked_button']['#value'] == $form_state['values']['submit_import']) {
+		$imports = migrate_preservation_import_titles();
+		if ($imports > 0) {
+			drupal_set_message(t('@num publication titles imported', array('@num' => $imports)));
+		} else {
+			drupal_set_message(t('No publication titles imported'));
+		}
+	}
+}
+
+function migrate_preservation_get_titles_from_datajs() {
+	$dir = DOCUMENT_PATH_ABSOLUTE;
+	$machine_name = 'publication_title';
+	$dirparts = explode('/', $dir);
+	if ($dirparts[0] = '') { 
+		array_shift($dirparts);
+	}
+	array_pop($dirparts);
+	$datajspath = implode('/', $dirparts) . '/projectLogo/data.js';
+	$datajs = file_exists($datajspath) ? file_get_contents($datajspath) : '';
+	
+	$dataparts = explode(';', $datajs);
+	$cityparts = explode('=', $dataparts[2]);
+	
+	$fulltitles = explode("\",\"", $cityparts[1]);
+	
+	$titles = array();
+	foreach ($fulltitles as $ft) {
+		$ft = str_replace(array('[', ']', "\""), '', $ft);
+		$tparts = explode('|', $ft);
+		$match = taxonomy_get_term_by_name($tparts[0], $machine_name);
+		if (empty($match)) {
+			$titles[] = $tparts[0];
+		}
+	}
+	return $titles;
+}
+
+function migrate_preservation_import_titles() {
+	$return = FALSE;
+	$titles = migrate_preservation_get_titles_from_datajs();
+	if (count($titles)) {
+		$return = count($titles);
+		$machine_name = 'publication_title';
+		$vocab = taxonomy_vocabulary_machine_name_load($machine_name);
+		foreach ($titles as $title) {
+			$match = taxonomy_get_term_by_name($title, $machine_name);
+			if (empty($match)) {
+				$term = new StdClass();
+				$term->name = $title;
+				$term->vid = $vocab->vid;
+				taxonomy_term_save($term);
+			}
+		}
+	}
+	return $return;
+}
+
+function migrate_preservation_convert_xml_batch() {
+	$dir = DOCUMENT_PATH_ABSOLUTE;
+	$files = file_scan_directory($dir, '/.*\.xml$/');
+	$filecount = count($files);
+	
+	drupal_set_message(t('Creating an array of @num operations', array('@num' => $filecount)));
+	$i = 0;
+	$operations = array();
+	foreach ($files as $file) {
+		$operations[] = array('migrate_preservation_convert_xml', array($file, t('(File @num)', array('@num' => $i))));
+		$i++;
+	}
+	
+	$batch = array(
+		'operations' => $operations,
+		'finished' => 'migrate_preservation_convert_xml_finished',
+	);
+	return $batch;
+}
+
+function migrate_preservation_convert_xml_finished($success, $results, $operations) {
+	if ($success) {
+    // Here we could do something meaningful with the results.
+    // We just display the number of nodes we processed...
+    drupal_set_message(t('@count results processed.', array('@count' => count($results))));
+    drupal_set_message(t('The final result was "%final"', array('%final' => end($results))));
+  }
+  else {
+    // An error occurred.
+    // $operations contains the operations that remained unprocessed.
+    $error_operation = reset($operations);
+    drupal_set_message(t('An error occurred while processing @operation with arguments : @args', array('@operation' => $error_operation[0], '@args' => print_r($error_operation[0], TRUE))));
+  }
+}
+
+function migrate_preservation_convert_xml($file, $operation_details, &$context) {
+	$images = InsertElementIntoXMLNodes($file->uri);
+	$context['results'][] = images;
+	$context['message'] = t('Converting file "@uri" with @count records', array('@uri' => $file->uri, '@count' => $images)) . ' ' . $operation_details;
+}
+
+function InsertElementIntoXMLNodes($uri) {
+	//read them as an xml documents
+	$doc = new DOMDocument(); 
+	$doc->load($uri);
+
+	//go into the <reel><image> node
+	$images = $doc->getElementsByTagName( "image" ); 
+	$imagecount = $images->length;
+	foreach($images as $image) {
+		//add an element <id>
+		$id = $doc->createElement( "id" );
+		//TODO: //read from the seed file the unique id (seed file +1)
+		$nextSeed = migrate_preservation_get_next_xml_id();
+		$id->appendChild($doc->createTextNode($nextSeed));
+		$image->appendChild( $id );
+	}
+	//update all image nodes in the file, save it
+	try {
+		$return = $doc->save($uri);
+		//dpm($return, 'return');
+	} catch (Exception $e) {
+		$return = 'nope';
+		//dpm($e->getMessage(), 'error');
+	}
+	return $imagecount;
+}
+
+function migrate_preservation_get_next_xml_id() {
+	$id = variable_get('migrate_preservation_xml_uid', 0);
+	//dpm($id, 'id');
+	$next = $id+1;
+	//dpm($next, 'next');
+	variable_set('migrate_preservation_xml_uid', $next);
+	return $id;
+}
+
+function GetNextSeedID() {
+	//check for seed file, if none exists, create one
+	$seedFile = "seedCounter.txt";
+	if(!file_exists($seedFile)) {
+		//need to create the seed file
+		CreateNewSeedFile(0);
+	}
+
+	// the seed file should be created
+	//set additional time for max execution because this takes a few minutes to run
+	$handle = fopen($seedFile, 'r');
+	$seedCounter = intval(trim(fread($handle, 10))); //the first 10 chars of the file
+	fclose($handle);
+	$nextSeed = $seedCounter + 1;
+	//write the new value
+	CreateNewSeedFile($nextSeed);
+	return $nextSeed;
+}
+
+function CreateNewSeedFile($startValue) {
+	//need to create the seed file
+	$seedFile = "seedCounter.txt";
+	$handle = fopen($seedFile, 'w') or die("can't open file");
+	fwrite($handle, $startValue);
+	fclose($handle);
+}
+
+//move onto the next xml file, do the same
+
+//TODO: getting and setting the seed number should be its own function
+
+//EXAMPLE:
+//<reel>
+//	<image>
+//		<filename>scan_0001</filename>
+//		<title>The Seymour Democrat</title>
+//		<country>United States of America</country>
+//		<state>Iowa</state>
+//		<city>Seymour</city>
+//		<date>1906-05-17</date>
+//		<lang>English</lang>
+//		<pagenum>1</pagenum>
+//		<exceptions/>
+//	</image>
